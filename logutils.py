@@ -98,7 +98,7 @@ def get_unique_file_name(file_path):
 def get_log_file_name():
     prefix = sys.argv[0].split(".py")[0]
     return get_unique_file_name(os.path.join(
-        os.getcwd(), "log-%s-%s.log" % (os.path.basename(prefix),
+        os.getcwd(), "log/", "log-%s-%s.log" % (os.path.basename(prefix),
                                         time.strftime('%Y%m%d%H%M%S', time.localtime()))))
 
 
