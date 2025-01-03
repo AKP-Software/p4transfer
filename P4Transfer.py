@@ -435,7 +435,7 @@ STOP_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), STOP_F
 def controlled_sleep(minutes):
     start_time = time.time()
     end_time = start_time + (minutes * 60)
-    
+
     while time.time() < end_time:
         if stop_file_exists(STOP_FILE_PATH):
             # Log or print that we detected the stop file and are breaking out of sleep
@@ -563,21 +563,24 @@ def getKTextDigest(fname):
 def diskFileContentModified(file):
     fileSize = 0
     digest = ""
+    if "delete" in file.action: # why would we care about deletions
+        return False
     if "symlink" in file.type:
-        if os.name == "posix":
-            assert(os.path.islink(file.fixedLocalFile))
-            linktarget = os.readlink(file.fixedLocalFile)
-            linktarget += "\n"
-            m = hashlib.md5()
-            if python3:
-                m.update(linktarget.encode())
-            else:
-                m.update(linktarget)
-            fileSize = len(linktarget)
-            digest = m.hexdigest()
-        else:
-            fileSize = os.path.getsize(file.fixedLocalFile)
-            digest = getLocalDigest(file.fixedLocalFile)
+        return False
+        # if os.name == "posix":
+        #     assert(os.path.islink(file.fixedLocalFile))
+        #     linktarget = os.readlink(file.fixedLocalFile)
+        #     linktarget += "\n"
+        #     m = hashlib.md5()
+        #     if python3:
+        #         m.update(linktarget.encode())
+        #     else:
+        #         m.update(linktarget)
+        #     fileSize = len(linktarget)
+        #     digest = m.hexdigest()
+        # else:
+        #     fileSize = os.path.getsize(file.fixedLocalFile)
+        #     digest = getLocalDigest(file.fixedLocalFile)
     elif fileContentComparisonPossible(file.type):
         try:
             fileSize = os.path.getsize(file.fixedLocalFile)
@@ -1090,7 +1093,7 @@ class MoveTracker(object):
         for depotFile in self.adds:
             if depotFile in self.deletes:
                 self.logger.debug("%s: Matched move add/delete '%s'" % (msg, depotFile))
-                del self.deletes[depotFile]
+                # del self.deletes[depotFile]
             else:
                 self.logger.debug("%s: Action move/add changed to add '%s'" % (msg, depotFile))
                 if specialMovesSupported():
@@ -1139,7 +1142,7 @@ class P4Source(P4Base):
         self.srcFileLogCache = {}
 
     def missingChanges(self, counter):
-        revRange = '//{client}/...@{rev},#head'.format(client=self.P4CLIENT, rev=counter + 1)
+        revRange = '//{client}/...@{rev},@{maxRev}'.format(client=self.P4CLIENT, rev=counter + 1, maxRev=counter + 200000)
         if sourceTargetTextComparison.sourceP4DVersion > "2017.1":
             # We can be more efficient with 2017.2 or greater servers with changes -r -m
             maxChanges = 0
@@ -1295,6 +1298,7 @@ class P4Source(P4Base):
                                     movetracker.trackAdd(chRev, integ.file)
                             if not found:
                                 self.logger.warning(u"Failed to find integ record for move/add {}".format(flog.depotFile))
+                                fileRevs.append(chRev) # Add the file anyway, we still want it even if we don't know where it came from
                     else:
                         fileRevs.append(chRev)
                 # else:
@@ -1494,7 +1498,10 @@ class P4Target(P4Base):
                     self.replicateBranch(f, dirty=True)
                 else:
                     self.logger.debug('processing:0020 add')
-                    self.p4cmd('add', '-ft', f.type, f.fixedLocalFile)
+                    output = self.p4cmd('add', '-fIt', f.type, f.fixedLocalFile)
+                    if len(output) > 0 and self.re_cant_add_existing_file.search(str(output[-1])):
+                        self.p4cmd('sync', '-k', f.fixedLocalFile)
+                        self.p4cmd('edit', '-t', f.type, f.fixedLocalFile)
             elif f.action == 'delete':
                 if f.hasIntegrations() and not f.hasOnlyMovedFromIntegrations():
                     self.replicateIntegration(f)
@@ -1567,6 +1574,13 @@ class P4Target(P4Base):
                 if chRev.type != ofile['type']:
                     # Can't just do a reopen to +l if working with a commit/edge environment
                     if '+' in chRev.type and 'l' in chRev.type.split('+')[1]:
+                        result = self.p4cmd('reopen', '-t', chRev.type, ofile['depotFile'])
+                        if "can't change +l type with reopen; use revert -k and then edit -t to change type." in str(result):
+                            self.logger.warning(f"Issue identified with file {ofile['depotFile']} suggesting to use 'revert -k' and type change.")
+                            self.p4cmd('revert', '-k', ofile['depotFile'])
+                            self.p4cmd('add', '-t', chRev.type, ofile['depotFile'])
+                            self.p4cmd('edit', '-t', chRev.type, ofile['depotFile'])
+                    elif '+' in ofile['type'] and 'l' in ofile['type'].split('+')[1]:
                         result = self.p4cmd('reopen', '-t', chRev.type, ofile['depotFile'])
                         if "can't change +l type with reopen; use revert -k and then edit -t to change type." in str(result):
                             self.logger.warning(f"Issue identified with file {ofile['depotFile']} suggesting to use 'revert -k' and type change.")
@@ -1745,13 +1759,17 @@ class P4Target(P4Base):
         self.logger.debug('processing:0100 move/add')
         doMove = False
         ind = 0
+        hasIntegrations = file.hasIntegrations()
+        numIntegrations = file.numIntegrations()
         if file.hasIntegrations():
             while ind < file.numIntegrations():
+                integration = file.getIntegration(ind)
                 if file.getIntegration(ind).how == 'moved from':
                     break
                 ind += 1
-            assert(ind < file.numIntegrations())
-            if file.getIntegration(ind).localFile:
+            if ind >= file.numIntegrations():
+                doMove = False
+            elif file.getIntegration(ind).localFile:
                 doMove = True
         if doMove:
             source = file.getIntegration(ind).localFile
@@ -1898,8 +1916,8 @@ class P4Target(P4Base):
             self.logger.debug('processing:0230 add')
             output = self.p4cmd('add', '-ft', file.type, file.fixedLocalFile)
             if len(output) > 0 and self.re_cant_add_existing_file.search(str(output[-1])):
-                self.p4cmd('sync', '-k', file.fixedLocalFile)
-                self.p4cmd('edit', '-t', file.type, file.fixedLocalFile)
+                self.p4cmd('sync', '-k', file.localFile)
+                self.p4cmd('edit', '-t', file.type, file.localFile)
             if diskFileContentModified(file):
                 self.logger.warning('Resyncing add due to file content changes')
                 self.src.p4cmd('sync', '-f', file.localFileRev())
@@ -2296,9 +2314,9 @@ class P4Transfer(object):
         parser.add_argument('-m', '--maximum', default=None, type=int, help="Maximum number of changes to transfer")
         parser.add_argument('--reset-connection', default=None, type=int, help="No of files after which to reset connection (for large changes)")
         parser.add_argument('-k', '--nokeywords', action='store_true', help="Do not expand keywords and remove +k from filetype")
-        parser.add_argument('-r', '--repeat', action='store_true',
+        parser.add_argument('-r', '--repeat', default=True,
                             help="Repeat transfer in a loop - for continuous transfer as background task")
-        parser.add_argument('-s', '--stoponerror', action='store_true', help="Stop on any error even if --repeat has been specified")
+        parser.add_argument('-s', '--stoponerror', default=None, help="Stop on any error even if --repeat has been specified")
         parser.add_argument('--ignore-errors', action='store_true', help="Ignore changelist comparison errors - just log as Error and carry on")
         parser.add_argument('--sample-config', action='store_true', help="Print an example config file and exit")
         parser.add_argument('-i', '--ignore-integrations', action='store_true', help="Treat integrations as adds and edits")
@@ -2307,6 +2325,8 @@ class P4Transfer(object):
                             " for automation runs during quiet periods e.g. run overnight but stop first thing in the morning")
         self.options = parser.parse_args(list(args))
         self.options.sync_progress_size_interval = None
+
+        print(self.options)
 
         if self.options.sample_config:
             printSampleConfig()
@@ -2471,8 +2491,9 @@ class P4Transfer(object):
                 fcount = fsize = 0
                 if change['change'] in changeSizes:
                     fcount, fsize = changeSizes[change['change']]
-                msg = 'Processing change: {}, files {}, size {} "{}"'.format(
-                            change['change'], fcount, fmtsize(fsize), change['desc'].strip())
+                time = datetime.utcfromtimestamp(int(change['time'])).strftime("%Y/%m/%d %H:%M:%S")
+                msg = 'Processing change: {}, date {}, files {}, size {} "{}"'.format(
+                            change['change'], time, fcount, fmtsize(fsize), change['desc'].strip())
                 self.logger.info(msg)
                 fileRevs, specialMoveRevs, srcFileLogs = self.source.getChange(change['change'])
                 targetChange = self.target.replicateChange(fileRevs, specialMoveRevs, srcFileLogs, change, self.source.p4.port)
