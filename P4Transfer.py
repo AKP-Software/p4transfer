@@ -936,6 +936,8 @@ class P4Base(object):
     def matchingSourceStreams(self, view):
         "Search for any streams matching the source view expanding p4 wildcards *"
         streams = self.p4.run_streams(view['src'])  # Valid with wildcards
+        if view['filter_regex']:
+            streams = [x for x in streams if re.match(view['filter_regex'], x['Stream'])]
         if not streams:
             raise P4TConfigException("No source streams found matching: '%s'" % view['src'])
         return [x['Stream'] for x in streams]
@@ -988,6 +990,12 @@ class P4Base(object):
                 transferStream["Type"] = "mainline"
                 transferStream["Paths"] = []
                 targStreamsUpdated = False
+
+                if self.options.change_map_stream:
+                    srcPath = self.options.change_map_stream.replace('//', '')
+                    line = "import+ %s/... %s/..." % (srcPath, self.options.change_map_stream)
+                    transferStream["Paths"].append(line)
+
                 for v in self.options.stream_views:
                     for s in matchingStreams:   # Array of tuples passed in
                         src = s[0]
@@ -2390,6 +2398,7 @@ class P4Transfer(object):
             GENERAL_SECTION, "change_description_format",
             "$sourceDescription\n\nTransferred from p4://$sourcePort@$sourceChange")
         self.options.change_map_file = self.getOption(GENERAL_SECTION, "change_map_file", "")
+        self.options.change_map_stream = self.getOption(GENERAL_SECTION, "change_map_stream", "")
         self.options.superuser = self.getOption(GENERAL_SECTION, "superuser", "y")
         self.options.views = self.getOption(GENERAL_SECTION, "views")
         self.options.transfer_target_stream = self.getOption(GENERAL_SECTION, "transfer_target_stream")
